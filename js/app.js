@@ -49,6 +49,14 @@
     return String(val);
   }
 
+  function getFirstVal(row, normMap, candidateNames) {
+    for (const candidate of candidateNames) {
+      const val = getVal(row, normMap, candidate);
+      if (val !== undefined) return val;
+    }
+    return undefined;
+  }
+
   function readFileAsRows(file) {
     const isCsv = /\.csv$/i.test(file.name);
     return new Promise((resolve, reject) => {
@@ -211,6 +219,13 @@
     return String(str).replace(/\s+/g, " ").trim();
   }
 
+  function setIfBlank(info, key, value) {
+    if (value === undefined) return;
+    const clean = collapseWhitespace(value);
+    if (!clean) return;
+    if (!info[key]) info[key] = clean;
+  }
+
   // --- Compile ---------------------------------------------------------------
 
   function compileFiles() {
@@ -218,6 +233,8 @@
     const trainingSet = new Set();
     // personKey -> Map(trainingName -> { allComplete: bool })
     const statusMap = new Map();
+    // personKey -> { managerId, managerFirstName, managerLastName, organizationId }
+    const personInfo = new Map();
 
     let skippedRows = 0;
 
@@ -254,6 +271,20 @@
         }
         const entry = personStatus.get(trainingName);
         entry.allComplete = entry.allComplete && rowIsComplete(row, normMap);
+
+        if (!personInfo.has(personKey)) {
+          personInfo.set(personKey, {
+            managerId: "",
+            managerFirstName: "",
+            managerLastName: "",
+            organizationId: "",
+          });
+        }
+        const info = personInfo.get(personKey);
+        setIfBlank(info, "managerId", getFirstVal(row, normMap, ["manager id", "manager id (user)"]));
+        setIfBlank(info, "managerFirstName", getFirstVal(row, normMap, ["first name manager", "manager first name"]));
+        setIfBlank(info, "managerLastName", getFirstVal(row, normMap, ["last name manager", "manager last name"]));
+        setIfBlank(info, "organizationId", getFirstVal(row, normMap, ["organization id"]));
       }
     }
 
@@ -278,7 +309,19 @@
         if (!entry) return "Unassigned";
         return entry.allComplete ? "Complete" : "Incomplete";
       });
-      return { firstName: person.firstName, lastName: person.lastName, cells };
+      const completedCount = cells.filter((status) => status === "Complete").length;
+      const percentComplete = trainings.length > 0 ? `${completedCount}/${trainings.length}` : "0/0";
+      const info = personInfo.get(person.key) || {};
+      return {
+        firstName: person.firstName,
+        lastName: person.lastName,
+        cells,
+        percentComplete,
+        managerId: info.managerId || "",
+        managerFirstName: info.managerFirstName || "",
+        managerLastName: info.managerLastName || "",
+        organizationId: info.organizationId || "",
+      };
     });
 
     return { trainings, matrix, skippedRows, fileCount: filesData.length };
@@ -290,7 +333,16 @@
     previewTable.innerHTML = "";
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
-    ["First Name", "Last Name", ...trainings].forEach((label) => {
+    [
+      "First Name",
+      "Last Name",
+      ...trainings,
+      "Percent Complete",
+      "Manager ID",
+      "Manager First Name",
+      "Manager Last Name",
+      "Organization ID",
+    ].forEach((label) => {
       const th = document.createElement("th");
       th.textContent = label;
       headRow.appendChild(th);
@@ -316,6 +368,19 @@
         td.appendChild(tag);
         tr.appendChild(td);
       });
+
+      [
+        person.percentComplete,
+        person.managerId,
+        person.managerFirstName,
+        person.managerLastName,
+        person.organizationId,
+      ].forEach((value) => {
+        const td = document.createElement("td");
+        td.textContent = value;
+        tr.appendChild(td);
+      });
+
       tbody.appendChild(tr);
     });
     previewTable.appendChild(tbody);
@@ -359,7 +424,16 @@
       views: [{ state: "frozen", ySplit: 1 }],
     });
 
-    const headerLabels = ["First Name", "Last Name", ...trainings];
+    const headerLabels = [
+      "First Name",
+      "Last Name",
+      ...trainings,
+      "Percent Complete",
+      "Manager ID",
+      "Manager First Name",
+      "Manager Last Name",
+      "Organization ID",
+    ];
     sheet.columns = headerLabels.map((label) => ({
       header: label,
       key: label,
@@ -367,7 +441,16 @@
     }));
 
     matrix.forEach((person) => {
-      sheet.addRow([person.firstName, person.lastName, ...person.cells]);
+      sheet.addRow([
+        person.firstName,
+        person.lastName,
+        ...person.cells,
+        person.percentComplete,
+        person.managerId,
+        person.managerFirstName,
+        person.managerLastName,
+        person.organizationId,
+      ]);
     });
 
     const headerRow = sheet.getRow(1);
@@ -384,9 +467,10 @@
       to: { row: 1, column: headerLabels.length },
     };
 
+    const lastTrainingCol = 2 + trainings.length;
     for (let r = 2; r <= sheet.rowCount; r++) {
       const row = sheet.getRow(r);
-      for (let c = 3; c <= headerLabels.length; c++) {
+      for (let c = 3; c <= lastTrainingCol; c++) {
         const cell = row.getCell(c);
         const colors = STATUS_COLORS[cell.value];
         if (colors) {
@@ -394,6 +478,9 @@
           cell.font = { color: { argb: colors.font }, bold: true };
         }
         cell.alignment = { horizontal: "center" };
+      }
+      for (let c = lastTrainingCol + 1; c <= headerLabels.length; c++) {
+        row.getCell(c).alignment = { horizontal: "center" };
       }
       row.getCell(1).alignment = { horizontal: "left" };
       row.getCell(2).alignment = { horizontal: "left" };
