@@ -226,14 +226,31 @@
     if (!info[key]) info[key] = clean;
   }
 
+  // --- Legal entity filtering -------------------------------------------------
+
+  const ALLOWED_LEGAL_ENTITIES = [
+    "ENGIE North America Inc.",
+    "MATEP LLC",
+    "SoCore Energy LLC",
+    "SoCore Installation Services LLC",
+  ];
+  const ALLOWED_LEGAL_ENTITY_SET = new Set(
+    ALLOWED_LEGAL_ENTITIES.map((name) => name.toLowerCase())
+  );
+
+  // Strips a trailing code suffix like " (42775)" from a raw Legal Entity value.
+  function cleanLegalEntity(value) {
+    return collapseWhitespace(String(value).replace(/\s*\([^)]*\)\s*$/, ""));
+  }
+
   // --- Compile ---------------------------------------------------------------
 
   function compileFiles() {
-    const people = new Map(); // personKey -> { firstName, lastName }
+    const people = new Map(); // personKey (User ID) -> { userId, firstName, lastName }
     const trainingSet = new Set();
     // personKey -> Map(trainingName -> { allComplete: bool })
     const statusMap = new Map();
-    // personKey -> { managerId, managerFirstName, managerLastName, organizationId }
+    // personKey -> { managerId, managerFirstName, managerLastName, organizationId, legalEntity }
     const personInfo = new Map();
 
     let skippedRows = 0;
@@ -247,6 +264,17 @@
           skippedRows++;
           continue;
         }
+        const rawUserId = getFirstVal(row, normMap, ["user id"]);
+        if (!rawUserId || !rawUserId.trim()) {
+          skippedRows++;
+          continue;
+        }
+        const rawLegalEntity = getVal(row, normMap, "legal entity");
+        const legalEntity = rawLegalEntity ? cleanLegalEntity(rawLegalEntity) : "";
+        if (!legalEntity || !ALLOWED_LEGAL_ENTITY_SET.has(legalEntity.toLowerCase())) {
+          skippedRows++;
+          continue;
+        }
         const trainingName = rowTrainingName(row, normMap);
         if (!trainingName) {
           skippedRows++;
@@ -255,10 +283,11 @@
 
         const firstName = collapseWhitespace(rawFirst);
         const lastName = collapseWhitespace(rawLast);
-        const personKey = `${firstName.toLowerCase()}|${lastName.toLowerCase()}`;
+        const userId = collapseWhitespace(rawUserId);
+        const personKey = userId;
 
         if (!people.has(personKey)) {
-          people.set(personKey, { firstName, lastName });
+          people.set(personKey, { userId, firstName, lastName });
         }
         trainingSet.add(trainingName);
 
@@ -278,6 +307,7 @@
             managerFirstName: "",
             managerLastName: "",
             organizationId: "",
+            legalEntity: "",
           });
         }
         const info = personInfo.get(personKey);
@@ -285,6 +315,7 @@
         setIfBlank(info, "managerFirstName", getFirstVal(row, normMap, ["first name manager", "manager first name"]));
         setIfBlank(info, "managerLastName", getFirstVal(row, normMap, ["last name manager", "manager last name"]));
         setIfBlank(info, "organizationId", getFirstVal(row, normMap, ["organization id"]));
+        setIfBlank(info, "legalEntity", legalEntity);
       }
     }
 
@@ -313,8 +344,10 @@
       const percentComplete = trainings.length > 0 ? `${completedCount}/${trainings.length}` : "0/0";
       const info = personInfo.get(person.key) || {};
       return {
+        userId: person.userId,
         firstName: person.firstName,
         lastName: person.lastName,
+        legalEntity: info.legalEntity || "",
         cells,
         percentComplete,
         managerId: info.managerId || "",
@@ -334,6 +367,7 @@
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
     [
+      "User ID",
       "First Name",
       "Last Name",
       ...trainings,
@@ -342,6 +376,7 @@
       "Manager First Name",
       "Manager Last Name",
       "Organization ID",
+      "Legal Entity",
     ].forEach((label) => {
       const th = document.createElement("th");
       th.textContent = label;
@@ -353,13 +388,15 @@
     const tbody = document.createElement("tbody");
     matrix.forEach((person) => {
       const tr = document.createElement("tr");
+      const tdUserId = document.createElement("td");
+      tdUserId.textContent = person.userId;
+      tr.appendChild(tdUserId);
       const tdFirst = document.createElement("td");
       tdFirst.textContent = person.firstName;
       tr.appendChild(tdFirst);
       const tdLast = document.createElement("td");
       tdLast.textContent = person.lastName;
       tr.appendChild(tdLast);
-
       person.cells.forEach((status) => {
         const td = document.createElement("td");
         const tag = document.createElement("span");
@@ -375,6 +412,7 @@
         person.managerFirstName,
         person.managerLastName,
         person.organizationId,
+        person.legalEntity,
       ].forEach((value) => {
         const td = document.createElement("td");
         td.textContent = value;
@@ -425,6 +463,7 @@
     });
 
     const headerLabels = [
+      "User ID",
       "First Name",
       "Last Name",
       ...trainings,
@@ -433,6 +472,7 @@
       "Manager First Name",
       "Manager Last Name",
       "Organization ID",
+      "Legal Entity",
     ];
     sheet.columns = headerLabels.map((label) => ({
       header: label,
@@ -442,6 +482,7 @@
 
     matrix.forEach((person) => {
       sheet.addRow([
+        person.userId,
         person.firstName,
         person.lastName,
         ...person.cells,
@@ -450,6 +491,7 @@
         person.managerFirstName,
         person.managerLastName,
         person.organizationId,
+        person.legalEntity,
       ]);
     });
 
@@ -467,10 +509,11 @@
       to: { row: 1, column: headerLabels.length },
     };
 
-    const lastTrainingCol = 2 + trainings.length;
+    const leadingCols = 3; // User ID, First Name, Last Name
+    const lastTrainingCol = leadingCols + trainings.length;
     for (let r = 2; r <= sheet.rowCount; r++) {
       const row = sheet.getRow(r);
-      for (let c = 3; c <= lastTrainingCol; c++) {
+      for (let c = leadingCols + 1; c <= lastTrainingCol; c++) {
         const cell = row.getCell(c);
         const colors = STATUS_COLORS[cell.value];
         if (colors) {
@@ -482,8 +525,9 @@
       for (let c = lastTrainingCol + 1; c <= headerLabels.length; c++) {
         row.getCell(c).alignment = { horizontal: "center" };
       }
-      row.getCell(1).alignment = { horizontal: "left" };
-      row.getCell(2).alignment = { horizontal: "left" };
+      for (let c = 1; c <= leadingCols; c++) {
+        row.getCell(c).alignment = { horizontal: "left" };
+      }
     }
 
     sheet.eachRow((row) => {

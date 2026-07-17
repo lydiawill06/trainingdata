@@ -19,7 +19,11 @@ generate a formatted `.xlsx` download.
   A person/training pair is **Complete** only if every matching row is
   complete, **Incomplete** if at least one row is not, and **Unassigned** if
   the person never appears with that training in any imported file. People
-  are matched across files by first + last name.
+  are matched across files by "User ID" (rows missing a User ID are
+  skipped). Rows are also filtered by "Legal Entity" (ignoring the trailing
+  code suffix, e.g. " (42775)") — only "ENGIE North America Inc.",
+  "MATEP LLC", "SoCore Energy LLC", and "SoCore Installation Services LLC"
+  are kept; everything else is dropped.
 - **Export**: downloads a styled `.xlsx` workbook (bold header, frozen top
   row, autofilter, color-coded status cells).
 
