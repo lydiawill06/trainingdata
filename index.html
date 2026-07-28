@@ -23,6 +23,11 @@
 
       <ul id="file-list"></ul>
 
+      <div class="date-row" id="new-compile-date-row" hidden>
+        <label for="new-compile-date-input">Date for the newly compiled data:</label>
+        <input type="text" id="new-compile-date-input" placeholder="YYYY-MM-DD" />
+      </div>
+
       <div class="actions">
         <button id="compile-btn" disabled>Compile Files</button>
         <button id="clear-btn" class="secondary" disabled>Clear All</button>
@@ -40,7 +45,12 @@
 
     <section class="panel" id="export-panel" hidden>
       <h2>3. Export</h2>
-      <p class="hint">Downloads a formatted .xlsx workbook with one row per person and one column per training.</p>
+      <p class="hint">
+        Downloads a formatted .xlsx workbook: a "Training Roster" sheet (one row per
+        person, one column per training), a "Compliance History" sheet tracking percent
+        complete over time, and, when a past compilation was imported, a "Roster Changes"
+        sheet listing everyone who is only in the oldest or only in the newest snapshot.
+      </p>
       <div class="actions">
         <button id="export-btn">Export as Excel (.xlsx)</button>
       </div>

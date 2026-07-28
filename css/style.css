@@ -152,6 +152,57 @@ main {
   flex-shrink: 0;
 }
 
+.kind-badge {
+  flex-shrink: 0;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.kind-badge.raw {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.kind-badge.compiled {
+  color: var(--unassigned);
+  background: var(--unassigned-bg);
+}
+
+#file-list li .date-input {
+  flex-shrink: 0;
+  width: 8.5rem;
+  font-size: 0.85rem;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  color: var(--text);
+}
+
+.date-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 1rem;
+  font-size: 0.9rem;
+}
+
+.date-row[hidden] {
+  display: none;
+}
+
+.date-row input {
+  width: 8.5rem;
+  font-size: 0.9rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  color: var(--text);
+}
+
 .actions {
   margin-top: 1.25rem;
   display: flex;

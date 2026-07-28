@@ -12,8 +12,10 @@
   const previewTable = document.getElementById("preview-table");
   const summaryHint = document.getElementById("summary-hint");
   const exportBtn = document.getElementById("export-btn");
+  const newCompileDateRow = document.getElementById("new-compile-date-row");
+  const newCompileDateInput = document.getElementById("new-compile-date-input");
 
-  // Each entry: { name, rows: [ {header: value, ...} ], normMap: Map(normalizedHeader -> originalHeader) }
+  // Each entry: { name, rows, normMap, kind: "raw"|"compiled", dateGuess: Date|null, dateLabel: string }
   const filesData = [];
 
   // Result of the last compile, kept for export.
@@ -57,6 +59,73 @@
     return undefined;
   }
 
+  // --- File kind & date detection --------------------------------------------
+
+  // A file is a raw training-system export if it has a training-name column
+  // ("Program Title"/"Item Title") or a completion-signal column ("Is
+  // Complete"/"Completion Status ID"/"Completion Status") - the columns this
+  // tool's own compiled exports never have (with or without "Percent
+  // Complete", which was only added partway through this tool's history).
+  const RAW_SHAPE_MARKERS = [
+    "program title",
+    "item title",
+    "is complete",
+    "completion status id",
+    "completion status",
+  ];
+  function detectKind(normMap) {
+    const isRaw = RAW_SHAPE_MARKERS.some((marker) => normMap.has(marker));
+    return isRaw ? "raw" : "compiled";
+  }
+
+  function guessDateFromFilename(name) {
+    let m = name.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (m) {
+      const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+      if (!isNaN(d)) return d;
+    }
+    // e.g. "7.1.26" or "7-1-26"
+    m = name.match(/\b(\d{1,2})[.\-](\d{1,2})[.\-](\d{2})\b/);
+    if (m) {
+      const month = Number(m[1]);
+      const day = Number(m[2]);
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        const d = new Date(2000 + Number(m[3]), month - 1, day);
+        if (!isNaN(d)) return d;
+      }
+    }
+    // e.g. "7.1.2026" or "7-1-2026"
+    m = name.match(/\b(\d{1,2})[.\-](\d{1,2})[.\-](\d{4})\b/);
+    if (m) {
+      const month = Number(m[1]);
+      const day = Number(m[2]);
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        const d = new Date(Number(m[3]), month - 1, day);
+        if (!isNaN(d)) return d;
+      }
+    }
+    return null;
+  }
+
+  function formatDateLabel(date) {
+    if (!date || isNaN(date)) return "";
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+
+  function parseDateLabel(label) {
+    if (!label || !label.trim()) return null;
+    const iso = label.trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (iso) {
+      const d = new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+      if (!isNaN(d)) return d;
+    }
+    const d = new Date(label.trim());
+    return isNaN(d) ? null : d;
+  }
+
   function readFileAsRows(file) {
     const isCsv = /\.csv$/i.test(file.name);
     return new Promise((resolve, reject) => {
@@ -93,6 +162,23 @@
       meta.textContent = entry.name;
       li.appendChild(meta);
 
+      const badge = document.createElement("span");
+      badge.className = `kind-badge ${entry.kind}`;
+      badge.textContent = entry.kind === "compiled" ? "Past compilation" : "Raw data";
+      li.appendChild(badge);
+
+      if (entry.kind === "compiled") {
+        const dateInput = document.createElement("input");
+        dateInput.type = "text";
+        dateInput.className = "date-input";
+        dateInput.value = entry.dateLabel;
+        dateInput.title = "Date this past compilation represents";
+        dateInput.addEventListener("input", () => {
+          entry.dateLabel = dateInput.value;
+        });
+        li.appendChild(dateInput);
+      }
+
       const count = document.createElement("span");
       count.className = "row-count";
       count.textContent = `${entry.rows.length} rows`;
@@ -111,6 +197,24 @@
 
       fileListEl.appendChild(li);
     });
+
+    updateNewCompileDateVisibility();
+  }
+
+  function updateNewCompileDateVisibility() {
+    const hasRaw = filesData.some((e) => e.kind === "raw");
+    newCompileDateRow.hidden = !hasRaw;
+    if (!hasRaw) {
+      newCompileDateInput.value = "";
+      return;
+    }
+    if (!newCompileDateInput.value.trim()) {
+      const guesses = filesData
+        .filter((e) => e.kind === "raw" && e.dateGuess)
+        .map((e) => e.dateGuess.getTime());
+      const guess = guesses.length ? new Date(Math.min(...guesses)) : new Date();
+      newCompileDateInput.value = formatDateLabel(guess);
+    }
   }
 
   function updateActionState() {
@@ -138,10 +242,17 @@
     for (const file of incoming) {
       try {
         const rows = await readFileAsRows(file);
+        const normMap = buildNormMap(rows);
+        const dateGuess =
+          guessDateFromFilename(file.name) ||
+          (file.lastModified ? new Date(file.lastModified) : null);
         filesData.push({
           name: file.name,
           rows,
-          normMap: buildNormMap(rows),
+          normMap,
+          kind: detectKind(normMap),
+          dateGuess,
+          dateLabel: formatDateLabel(dateGuess),
         });
       } catch (err) {
         setStatus(`Failed to read "${file.name}": ${err.message}`, true);
@@ -243,9 +354,9 @@
     return collapseWhitespace(String(value).replace(/\s*\([^)]*\)\s*$/, ""));
   }
 
-  // --- Compile ---------------------------------------------------------------
+  // --- Compile raw training-system exports ------------------------------------
 
-  function compileFiles() {
+  function compileRawFiles(entries) {
     const people = new Map(); // personKey (User ID) -> { userId, firstName, lastName }
     const trainingSet = new Set();
     // personKey -> Map(trainingName -> { allComplete: bool })
@@ -255,7 +366,7 @@
 
     let skippedRows = 0;
 
-    for (const file of filesData) {
+    for (const file of entries) {
       const { rows, normMap } = file;
       for (const row of rows) {
         const rawFirst = getVal(row, normMap, "first name");
@@ -344,6 +455,7 @@
       const percentComplete = trainings.length > 0 ? `${completedCount}/${trainings.length}` : "0/0";
       const info = personInfo.get(person.key) || {};
       return {
+        key: person.userId,
         userId: person.userId,
         firstName: person.firstName,
         lastName: person.lastName,
@@ -357,11 +469,124 @@
       };
     });
 
-    return { trainings, matrix, skippedRows, fileCount: filesData.length };
+    return { trainings, matrix, skippedRows, fileCount: entries.length };
+  }
+
+  // --- Parse a past compilation (this tool's own export format) --------------
+
+  const FIXED_COMPILED_COLUMNS = new Set([
+    "user id",
+    "first name",
+    "last name",
+    "percent complete",
+    "manager id",
+    "manager first name",
+    "manager last name",
+    "organization id",
+    "legal entity",
+  ]);
+
+  function parseCompiledFile(entry) {
+    const { rows, normMap } = entry;
+    const trainings = [];
+    for (const [normKey, originalKey] of normMap.entries()) {
+      if (!FIXED_COMPILED_COLUMNS.has(normKey)) {
+        trainings.push(originalKey);
+      }
+    }
+
+    const matrix = rows
+      .map((row) => {
+        const cells = trainings.map((training) => {
+          const val = row[training];
+          const clean = val === undefined || val === null ? "" : collapseWhitespace(val);
+          return clean || "Unassigned";
+        });
+        const userId = collapseWhitespace(getVal(row, normMap, "user id") || "");
+        const firstName = collapseWhitespace(getVal(row, normMap, "first name") || "");
+        const lastName = collapseWhitespace(getVal(row, normMap, "last name") || "");
+        return {
+          // Older exports (from before this tool tracked User ID) only have
+          // names, so fall back to a name-based key for matching across
+          // snapshots when no User ID is present.
+          key: userId || `name:${firstName.toLowerCase()}|${lastName.toLowerCase()}`,
+          userId,
+          firstName,
+          lastName,
+          legalEntity: collapseWhitespace(getVal(row, normMap, "legal entity") || ""),
+          cells,
+          percentComplete: getVal(row, normMap, "percent complete") || "",
+          managerId: getVal(row, normMap, "manager id") || "",
+          managerFirstName: getVal(row, normMap, "manager first name") || "",
+          managerLastName: getVal(row, normMap, "manager last name") || "",
+          organizationId: getVal(row, normMap, "organization id") || "",
+        };
+      })
+      .filter((person) => person.firstName && person.lastName);
+
+    return { trainings, matrix };
+  }
+
+  // --- Build one snapshot per input dataset (raw compile + each past file) ---
+
+  function buildSnapshots() {
+    const rawEntries = filesData.filter((e) => e.kind === "raw");
+    const compiledEntries = filesData.filter((e) => e.kind === "compiled");
+
+    const snapshots = [];
+
+    compiledEntries.forEach((entry) => {
+      const { trainings, matrix } = parseCompiledFile(entry);
+      const date = parseDateLabel(entry.dateLabel) || entry.dateGuess || null;
+      snapshots.push({
+        label: entry.dateLabel.trim() || entry.name,
+        date,
+        trainings,
+        matrix,
+        totalCount: matrix.length,
+        sourceName: entry.name,
+        isRawCompile: false,
+      });
+    });
+
+    let rawResult = null;
+    if (rawEntries.length > 0) {
+      rawResult = compileRawFiles(rawEntries);
+      const label = newCompileDateInput.value.trim() || formatDateLabel(new Date());
+      snapshots.push({
+        label,
+        date: parseDateLabel(label),
+        trainings: rawResult.trainings,
+        matrix: rawResult.matrix,
+        totalCount: rawResult.matrix.length,
+        sourceName: "New compile",
+        isRawCompile: true,
+      });
+    }
+
+    snapshots.sort((a, b) => {
+      if (a.date && b.date) return a.date - b.date;
+      if (a.date) return -1;
+      if (b.date) return 1;
+      return 0;
+    });
+
+    const primary = rawResult
+      ? snapshots.find((s) => s.isRawCompile)
+      : snapshots[snapshots.length - 1];
+
+    return {
+      primary,
+      snapshots,
+      hasOld: compiledEntries.length > 0,
+      skippedRows: rawResult ? rawResult.skippedRows : 0,
+      fileCount: filesData.length,
+    };
   }
 
   function renderPreview(result) {
-    const { trainings, matrix, skippedRows, fileCount } = result;
+    const { primary, snapshots, hasOld, skippedRows, fileCount } = result;
+    const { trainings, matrix } = primary;
 
     previewTable.innerHTML = "";
     const thead = document.createElement("thead");
@@ -423,9 +648,16 @@
     });
     previewTable.appendChild(tbody);
 
-    summaryHint.textContent =
-      `${matrix.length} people, ${trainings.length} training(s) compiled from ${fileCount} file(s).` +
-      (skippedRows > 0 ? ` (${skippedRows} row(s) skipped for missing name or training data.)` : "");
+    let hint = primary.isRawCompile
+      ? `${matrix.length} people, ${trainings.length} training(s) compiled from ${fileCount} file(s).`
+      : `${matrix.length} people, ${trainings.length} training(s) shown from past compilation "${primary.sourceName}".`;
+    if (skippedRows > 0) hint += ` (${skippedRows} row(s) skipped for missing name or training data.)`;
+    hint += ` ${snapshots.length} snapshot(s) will appear in the Compliance History sheet.`;
+    const diffPair = hasOld ? pickDiffPair(snapshots) : null;
+    if (diffPair) {
+      hint += ` A Roster Changes sheet will compare "${diffPair.oldSnap.label}" against "${diffPair.newSnap.label}".`;
+    }
+    summaryHint.textContent = hint;
 
     previewPanel.hidden = false;
     exportPanel.hidden = false;
@@ -434,7 +666,7 @@
   compileBtn.addEventListener("click", () => {
     if (filesData.length === 0) return;
     try {
-      compiled = compileFiles();
+      compiled = buildSnapshots();
       renderPreview(compiled);
       setStatus(`Compiled successfully.`);
     } catch (err) {
@@ -450,15 +682,42 @@
     Unassigned: { font: "FF8A94A3", fill: "FFEEF0F3" },
   };
 
-  async function exportWorkbook() {
-    if (!compiled) return;
-    const { trainings, matrix } = compiled;
+  function styleHeaderRow(row, color) {
+    row.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    row.fill = { type: "pattern", pattern: "solid", fgColor: { argb: color || "FF2F6FED" } };
+    row.alignment = { vertical: "middle", horizontal: "center" };
+  }
 
-    const workbook = new ExcelJS.Workbook();
-    workbook.creator = "Training Compliance Compiler";
-    workbook.created = new Date();
+  function applyBorders(sheet) {
+    sheet.eachRow((row) => {
+      row.eachCell((cell) => {
+        cell.border = {
+          top: { style: "thin", color: { argb: "FFDDE1E7" } },
+          left: { style: "thin", color: { argb: "FFDDE1E7" } },
+          bottom: { style: "thin", color: { argb: "FFDDE1E7" } },
+          right: { style: "thin", color: { argb: "FFDDE1E7" } },
+        };
+      });
+    });
+  }
 
-    const sheet = workbook.addWorksheet("Training Roster", {
+  function colorTrainingCells(sheet, firstDataRow, lastDataRow, firstTrainingCol, lastTrainingCol) {
+    for (let r = firstDataRow; r <= lastDataRow; r++) {
+      const row = sheet.getRow(r);
+      for (let c = firstTrainingCol; c <= lastTrainingCol; c++) {
+        const cell = row.getCell(c);
+        const colors = STATUS_COLORS[cell.value];
+        if (colors) {
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: colors.fill } };
+          cell.font = { color: { argb: colors.font }, bold: true };
+        }
+        cell.alignment = { horizontal: "center" };
+      }
+    }
+  }
+
+  function addRosterSheet(workbook, sheetName, trainings, matrix) {
+    const sheet = workbook.addWorksheet(sheetName, {
       views: [{ state: "frozen", ySplit: 1 }],
     });
 
@@ -495,15 +754,7 @@
       ]);
     });
 
-    const headerRow = sheet.getRow(1);
-    headerRow.font = { bold: true, color: { argb: "FFFFFFFF" } };
-    headerRow.fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: "FF2F6FED" },
-    };
-    headerRow.alignment = { vertical: "middle", horizontal: "center" };
-
+    styleHeaderRow(sheet.getRow(1));
     sheet.autoFilter = {
       from: { row: 1, column: 1 },
       to: { row: 1, column: headerLabels.length },
@@ -511,17 +762,9 @@
 
     const leadingCols = 3; // User ID, First Name, Last Name
     const lastTrainingCol = leadingCols + trainings.length;
+    colorTrainingCells(sheet, 2, sheet.rowCount, leadingCols + 1, lastTrainingCol);
     for (let r = 2; r <= sheet.rowCount; r++) {
       const row = sheet.getRow(r);
-      for (let c = leadingCols + 1; c <= lastTrainingCol; c++) {
-        const cell = row.getCell(c);
-        const colors = STATUS_COLORS[cell.value];
-        if (colors) {
-          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: colors.fill } };
-          cell.font = { color: { argb: colors.font }, bold: true };
-        }
-        cell.alignment = { horizontal: "center" };
-      }
       for (let c = lastTrainingCol + 1; c <= headerLabels.length; c++) {
         row.getCell(c).alignment = { horizontal: "center" };
       }
@@ -530,16 +773,224 @@
       }
     }
 
-    sheet.eachRow((row) => {
-      row.eachCell((cell) => {
-        cell.border = {
-          top: { style: "thin", color: { argb: "FFDDE1E7" } },
-          left: { style: "thin", color: { argb: "FFDDE1E7" } },
-          bottom: { style: "thin", color: { argb: "FFDDE1E7" } },
-          right: { style: "thin", color: { argb: "FFDDE1E7" } },
-        };
+    applyBorders(sheet);
+    return sheet;
+  }
+
+  // Union of every training name that appears in any of the given snapshots,
+  // in first-seen order.
+  function collectTrainingUnion(snapshots) {
+    const seen = [];
+    const set = new Set();
+    snapshots.forEach((snap) => {
+      snap.trainings.forEach((t) => {
+        if (!set.has(t)) {
+          set.add(t);
+          seen.push(t);
+        }
       });
     });
+    return seen;
+  }
+
+  // Builds the "Compliance History" sheet: one row per snapshot (oldest to
+  // newest), with a Complete count and % Complete for each training.
+  function addHistorySheet(workbook, snapshots) {
+    const trainings = collectTrainingUnion(snapshots);
+    const sheet = workbook.addWorksheet("Compliance History");
+
+    const latest = snapshots[snapshots.length - 1];
+    const totalCols = 1 + trainings.length * 2;
+
+    const row1 = sheet.getRow(1);
+    row1.getCell(1).value = `${latest.totalCount} Trainees`;
+    trainings.forEach((training, i) => {
+      const startCol = 2 + i * 2;
+      sheet.mergeCells(1, startCol, 1, startCol + 1);
+      row1.getCell(startCol).value = training;
+    });
+
+    const row2 = sheet.getRow(2);
+    trainings.forEach((training, i) => {
+      const startCol = 2 + i * 2;
+      row2.getCell(startCol).value = "Complete";
+      row2.getCell(startCol + 1).value = "% Complete";
+    });
+
+    snapshots.forEach((snap) => {
+      const rowValues = [snap.label];
+      trainings.forEach((training) => {
+        const idx = snap.trainings.indexOf(training);
+        if (idx === -1) {
+          rowValues.push("", "");
+          return;
+        }
+        const completeCount = snap.matrix.filter((p) => p.cells[idx] === "Complete").length;
+        const pct = snap.totalCount > 0 ? completeCount / snap.totalCount : 0;
+        rowValues.push(completeCount, pct);
+      });
+      sheet.addRow(rowValues);
+    });
+
+    for (let i = 0; i < trainings.length; i++) {
+      const pctCol = 2 + i * 2 + 1;
+      for (let r = 3; r <= sheet.rowCount; r++) {
+        const cell = sheet.getRow(r).getCell(pctCol);
+        if (typeof cell.value === "number") cell.numFmt = "0.00%";
+      }
+    }
+
+    styleHeaderRow(row1);
+    styleHeaderRow(row2);
+    sheet.getColumn(1).width = 16;
+    for (let c = 2; c <= totalCols; c++) sheet.getColumn(c).width = 13;
+
+    for (let r = 1; r <= sheet.rowCount; r++) {
+      const row = sheet.getRow(r);
+      row.getCell(1).alignment = { horizontal: "left", vertical: "middle" };
+      for (let c = 2; c <= totalCols; c++) {
+        row.getCell(c).alignment = { horizontal: "center", vertical: "middle" };
+      }
+    }
+
+    applyBorders(sheet);
+    return sheet;
+  }
+
+  // Picks the two snapshots to diff: a freshly compiled raw snapshot is
+  // always "new" (it's the current, live pull) regardless of what date its
+  // source filenames happen to carry; "old" is the earliest past
+  // compilation. With no raw data, falls back to oldest vs newest compiled
+  // snapshot overall.
+  function pickDiffPair(snapshots) {
+    if (snapshots.length < 2) return null;
+    const compiledSnapshots = snapshots.filter((s) => !s.isRawCompile);
+    const rawSnapshot = snapshots.find((s) => s.isRawCompile);
+    if (rawSnapshot) {
+      if (compiledSnapshots.length === 0) return null;
+      return { oldSnap: compiledSnapshots[0], newSnap: rawSnapshot };
+    }
+    return { oldSnap: compiledSnapshots[0], newSnap: compiledSnapshots[compiledSnapshots.length - 1] };
+  }
+
+  function buildRosterIndex(snapshot) {
+    const map = new Map();
+    snapshot.matrix.forEach((person) => {
+      if (person.key) map.set(person.key, person);
+    });
+    return map;
+  }
+
+  // Builds the "Roster Changes" sheet: every person present in only the
+  // oldest snapshot, or only in the newest snapshot, not both.
+  function addDiffSheet(workbook, oldSnap, newSnap) {
+    const trainings = collectTrainingUnion([oldSnap, newSnap]);
+    const oldIndex = buildRosterIndex(oldSnap);
+    const newIndex = buildRosterIndex(newSnap);
+
+    const rows = [];
+    oldIndex.forEach((person, key) => {
+      if (!newIndex.has(key)) {
+        rows.push({ person, snap: oldSnap, status: `Only in ${oldSnap.label}` });
+      }
+    });
+    newIndex.forEach((person, key) => {
+      if (!oldIndex.has(key)) {
+        rows.push({ person, snap: newSnap, status: `Only in ${newSnap.label}` });
+      }
+    });
+
+    rows.sort((a, b) => {
+      if (a.status !== b.status) return a.status.localeCompare(b.status);
+      return a.person.lastName.localeCompare(b.person.lastName, undefined, { sensitivity: "base" });
+    });
+
+    const sheet = workbook.addWorksheet("Roster Changes", {
+      views: [{ state: "frozen", ySplit: 1 }],
+    });
+
+    const headerLabels = [
+      "User ID",
+      "First Name",
+      "Last Name",
+      ...trainings,
+      "Percent Complete",
+      "Manager ID",
+      "Manager First Name",
+      "Manager Last Name",
+      "Organization ID",
+      "Legal Entity",
+      "Snapshot Date",
+      "Status",
+    ];
+    sheet.columns = headerLabels.map((label) => ({
+      header: label,
+      key: label,
+      width: Math.min(Math.max(label.length + 4, 14), 40),
+    }));
+
+    rows.forEach(({ person, snap, status }) => {
+      const cells = trainings.map((training) => {
+        const idx = snap.trainings.indexOf(training);
+        return idx === -1 ? "" : person.cells[idx];
+      });
+      sheet.addRow([
+        person.userId,
+        person.firstName,
+        person.lastName,
+        ...cells,
+        person.percentComplete,
+        person.managerId,
+        person.managerFirstName,
+        person.managerLastName,
+        person.organizationId,
+        person.legalEntity,
+        snap.label,
+        status,
+      ]);
+    });
+
+    styleHeaderRow(sheet.getRow(1));
+    sheet.autoFilter = {
+      from: { row: 1, column: 1 },
+      to: { row: 1, column: headerLabels.length },
+    };
+
+    const leadingCols = 3;
+    const lastTrainingCol = leadingCols + trainings.length;
+    colorTrainingCells(sheet, 2, sheet.rowCount, leadingCols + 1, lastTrainingCol);
+    for (let r = 2; r <= sheet.rowCount; r++) {
+      const row = sheet.getRow(r);
+      for (let c = lastTrainingCol + 1; c <= headerLabels.length; c++) {
+        row.getCell(c).alignment = { horizontal: "center" };
+      }
+      for (let c = 1; c <= leadingCols; c++) {
+        row.getCell(c).alignment = { horizontal: "left" };
+      }
+    }
+
+    applyBorders(sheet);
+    return sheet;
+  }
+
+  async function exportWorkbook() {
+    if (!compiled) return;
+    const { primary, snapshots, hasOld } = compiled;
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "Training Compliance Compiler";
+    workbook.created = new Date();
+
+    addRosterSheet(workbook, "Training Roster", primary.trainings, primary.matrix);
+
+    if (snapshots.length > 0) {
+      addHistorySheet(workbook, snapshots);
+    }
+
+    const diffPair = hasOld ? pickDiffPair(snapshots) : null;
+    if (diffPair) {
+      addDiffSheet(workbook, diffPair.oldSnap, diffPair.newSnap);
+    }
 
     const buffer = await workbook.xlsx.writeBuffer();
     const blob = new Blob([buffer], {
